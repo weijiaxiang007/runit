@@ -1,0 +1,199 @@
+#!/bin/bash
+
+CONFIG_FILE='Procfile'
+ENV_FILE='.env'
+PORT="8080"
+DATE_FORMAT="+%Y-%m-%d|%H:%M:%S"
+CMD=""
+RUN_FLAG=0
+declare -a CMD_LIST
+
+function usage() {
+    echo 'Usage: runit [-c] [-f procfile|Procfile] [-e envfile|.env]'
+    echo 'Adminstrate your processes (the current directory "prod/Procfile" configuration file by default)'
+    echo 'Default port is 8080'
+    echo ''
+    echo '[OPTION]...'
+    echo 'runit   start all processes in configuration procfile.'
+    echo '  -f, --file    configuration file.'
+    echo '  -e, --env     env_file.'
+    echo '  -c, --check   check the format of the file procfile and env_file is correct.'
+    echo '  -h, --help    display this help and exit.'
+
+}
+
+function verify() {
+    err="no"
+    count=0
+    if [ -f $ENV_FILE ];then
+	while read line;do
+	    ((count=$count+1))
+	    if $(echo ${line//#*/""}|grep -qv '^$');then
+		line_s=${line%%=*}
+		if (grep -qP '[[:punct:]]' <(echo ${line_s//"_"/""})) || !(grep -qo "=" <(echo ${line})) || (grep -o " " <(echo ${line}));then
+			echo "$ENV_FILE : $count lines ( $line ) Syntax Error"
+			err="yes"
+		fi
+	    fi
+	done<$ENV_FILE
+    fi
+	
+    count=0
+    if [ -f $CONFIG_FILE ];then
+	while read line;do
+	    ((count=$count+1))
+	    if $( echo ${line//#*/""}|grep -qv '^$');then
+		line_s=${line%%:*}
+		if (grep -qP '[[:punct:]]' <(echo ${line_s//"_"/""})) || !(grep -qo ":" <(echo ${line}));then
+			echo "$CONFIG_FILE : $count lines ( $line ) Syntax Error"
+			err="yes"
+		fi 
+	    fi
+	done<$CONFIG_FILE 
+    else 
+	echo "$CONFIG_FILE : no such file ..."
+    fi 
+    if [ "$err" = "no" ];then
+	return 1
+    fi
+}
+
+
+function run_command() {
+    verify
+    if [ $? -eq 1 ];then
+        if [ $RUN_FLAG -eq 0 ];then
+	    if [ -f ".env" ];then
+	         load_env_file ".env"
+	    fi
+	    if [ -f "Procfile" ];then
+	         load_procfile "Procfile"
+	    fi
+        elif [ $RUN_FLAG -eq 1 ];then
+	   load_env_file $ENV_FILE
+        elif [ $RUN_FLAG -eq 2 ];then
+	   load_procfile $CONFIG_FILE
+        elif [ $RUN_FLAG -eq 3 ];then
+	   load_env_file $ENV_FILE
+	   load_procfile $CONFIG_FILE
+        elif [ $RUN_FLAG -ge 5 ];then
+	   exit 1
+	fi
+    else
+	exit 2
+    fi
+    run_procfile
+} 
+
+function load_env_file() { 
+    if [[ -f $1 ]];then
+	. $1
+    else
+	echo -e "\033[31m File $1 is not exist \033[0m"
+	exit 2
+    fi
+}
+
+function load_procfile() {
+    if [[ -f $1 ]];then
+        while read line;do
+	    if $(echo ${line//#*/""}|grep -qv '^$');then
+                 CMD_LIST=("${CMD_LIST[@]}" "$line")
+	    fi
+        done<$1
+        export CMD_LIST
+    else
+        echo -e "\033[31m File $1 is not exist \033[0m"
+	exit 2 
+    fi
+}
+
+function run_procfile() {
+    for i in ${!CMD_LIST[*]}
+    do
+  	cmd=${CMD_LIST[$i]}" &>${CMD_LIST[$i]//:*/""}.log &"
+	cmd=$(echo $cmd|grep -P -o ':\K.+')	
+	eval ${cmd}
+	log "${CMD_LIST[$i]/"\$PORT"/$PORT}" "$!" "$i" &
+	if [[ "$cmd" =~ "PORT" ]];then
+	    ((PORT=$PORT+1))
+	fi
+    done
+    trap "(kill -9 `jobs -p|xargs`;rm -f *.log &>/dev/null)" SIGINT SIGTERM
+    wait
+    rm -f *.log
+}
+
+
+function log() {
+    case "$(($3%3))" in
+	0)
+	    st="[32m" ;;
+	1)
+	    st="[37m" ;;
+	2) 
+	    st="[34m" ;;
+    esac
+    cmd=${1}
+    cmd_s=`echo ${cmd//:*/""}`
+    cmd_e=`echo $cmd|grep -P -o ":\K.+"`
+    echo -e "\033$st " `date +%H:%M:%S`"    | $cmd_e started with pid $2" "\033[0m"
+    while [ 1 ];do
+       if [ -f "${cmd_s}.log" ];then
+	   output=$(grep -a -P '.+' "${cmd_s}.log")
+	 
+           if  [ -n "${output}" ];then
+               echo "${output}"| while read line
+               do
+                    echo -e "\033$st " `date +%H:%M:%S`"    | $line" "\033[0m"
+               done
+	       >"${cmd_s}.log"
+           fi
+       fi
+       if [ ! -d "/proc/$2" ];then
+	   exit 1
+       fi
+    done
+}
+
+
+function main() {             #读取命令行参数，并修改相关参数
+    if [[ $# -eq 0 ]];then
+   	run_command
+    else
+	while [ -n "$1" ]
+	do
+		case  "$1" in 
+	     		-h|--help)
+				usage; exit 1
+			;;
+			-c|--check)
+				((RUN_FLAG=$RUN_FLAG+5)); shift 1
+			;;
+			-e|--env)
+				if [[ -n "$2" ]] && [[ ! $2 =~ "-" ]];then
+				     ENV_FILE=$2;export ENV_FILE;((RUN_FLAG=$RUN_FLAG+1)); shift 2
+				else 
+				     echo "Usage: runit [-c] [-f procfile|Procfile] [-e envfile|.env]"
+				     break
+				fi
+			;;
+			-f|--file)
+				if [[ -n "$2" ]] && [[ ! $2 =~ "-" ]];then
+				     CONFIG_FILE=$2;export CONFIG_FILE;((RUN_FLAG=$RUN_FLAG+2)); shift 2
+	                        else 
+                                     echo "Usage: runit [-c] [-f procfile|Procfile] [-e envfile|.env]"
+                                     break
+                                fi
+			;;
+			*)
+		 		 echo "Usage: runit [-c] [-f procfile|Procfile] [-e envfile|.env]"
+				 break
+			;;
+		esac	
+	done
+	run_command
+    fi
+}
+
+main "$@"
